@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   ArrowLeft,
   QrCode,
@@ -29,12 +29,15 @@ interface ConnectScreenProps {
     dataChannel?: RTCDataChannel;
     peerConnection?: RTCPeerConnection;
   }) => void;
+  /** Invite code carried in from a scanned QR link (?join=CODE). */
+  initialJoinCode?: string;
 }
 
 export function ConnectScreen({
   onBack,
   myProfile,
   onSessionEstablished,
+  initialJoinCode,
 }: ConnectScreenProps) {
   const [activeTab, setActiveTab] = useState<"create" | "join">("create");
 
@@ -51,9 +54,15 @@ export function ConnectScreen({
   const [inputCode, setInputCode] = useState("");
   const [isJoining, setIsJoining] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
+  // Set once the peer has accepted an invite, so we can poll for the
+  // creator's trickle ICE candidates (see the join poll effect below).
+  const [joinSessionId, setJoinSessionId] = useState<string | null>(null);
 
   // WebRTC References
   const [peerConnection, setPeerConnection] = useState<RTCPeerConnection | null>(null);
+  // Mutable mirror of sessionId so ICE handlers created before the session
+  // exists can still upload candidates once it is created.
+  const sessionIdRef = useRef<string>("");
 
   // Generate Invite
   const handleCreateInvite = async () => {
@@ -76,25 +85,37 @@ export function ConnectScreen({
 
       setPeerConnection(pc);
 
-      // Collect ICE candidates
+      // Collect ICE candidates.
+      // NOTE: sessionId state is stale inside this closure (it is still "" when
+      // the handler is created), so we read it from a ref instead. Without this,
+      // every candidate after session creation fell into the buffer below and was
+      // never uploaded — leaving peerIceCandidates/creatorIceCandidates empty and
+      // the DataChannel unable to open.
       const pendingCandidates: RTCIceCandidate[] = [];
+      sessionIdRef.current = "";
+      const uploadCandidate = async (sid: string, cand: RTCIceCandidate) => {
+        try {
+          await fetch("/api/signaling", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "ice_candidate",
+              sessionId: sid,
+              role: "creator",
+              candidate: cand,
+            }),
+          });
+        } catch {
+          // non-fatal candidate upload
+        }
+      };
+
       pc.onicecandidate = async (event) => {
-        if (event.candidate && sessionId) {
-          try {
-            await fetch("/api/signaling", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                action: "ice_candidate",
-                sessionId,
-                role: "creator",
-                candidate: event.candidate,
-              }),
-            });
-          } catch {
-            // non-fatal candidate upload
-          }
-        } else if (event.candidate) {
+        if (!event.candidate) return;
+        const sid = sessionIdRef.current;
+        if (sid) {
+          await uploadCandidate(sid, event.candidate);
+        } else {
           pendingCandidates.push(event.candidate);
         }
       };
@@ -121,18 +142,14 @@ export function ConnectScreen({
         setStatusMessage("Waiting for peer to scan QR or enter code...");
         setTimeLeft(600);
 
-        // Upload any buffered candidates
-        for (const cand of pendingCandidates) {
-          await fetch("/api/signaling", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              action: "ice_candidate",
-              sessionId: data.sessionId,
-              role: "creator",
-              candidate: cand,
-            }),
-          });
+        // The ref must be set BEFORE flushing: any candidate arriving in the
+        // meantime now uploads directly instead of falling back into the buffer.
+        sessionIdRef.current = data.sessionId;
+
+        // Upload any buffered candidates gathered before the session existed
+        const buffered = pendingCandidates.splice(0, pendingCandidates.length);
+        for (const cand of buffered) {
+          await uploadCandidate(data.sessionId, cand);
         }
 
         // Setup DC callbacks
@@ -151,6 +168,13 @@ export function ConnectScreen({
             });
           }, 800);
         };
+
+        // Do not sit on "Exchanging keys..." forever if the peer never connects
+        setTimeout(() => {
+          if (dc.readyState !== "open") {
+            setStatusMessage("Still waiting for your peer to accept — code expires soon.");
+          }
+        }, 30000);
       } else {
         setStatusMessage("Signaling error: " + (data.error || "Failed to initialize"));
       }
@@ -165,6 +189,10 @@ export function ConnectScreen({
   // Poll for Answer SDP if waiting
   useEffect(() => {
     if (pairingStatus !== "listening" || !sessionId) return;
+
+    // Candidates are returned in full on every poll, so track what we have
+    // already applied instead of re-adding them each cycle.
+    const added = new Set<string>();
 
     const interval = setInterval(async () => {
       try {
@@ -187,10 +215,13 @@ export function ConnectScreen({
 
           if (data.remoteCandidates && Array.isArray(data.remoteCandidates)) {
             for (const c of data.remoteCandidates) {
+              const key = JSON.stringify(c);
+              if (added.has(key)) continue;
+              added.add(key);
               try {
                 await peerConnection.addIceCandidate(new RTCIceCandidate(c));
               } catch {
-                // ignore duplicate candidate
+                // ignore malformed or duplicate candidate
               }
             }
           }
@@ -203,6 +234,47 @@ export function ConnectScreen({
     return () => clearInterval(interval);
   }, [pairingStatus, sessionId, peerConnection]);
 
+  // Poll for the CREATOR's ICE candidates while we are the joining peer.
+  // Without this, only one side ever learns the other's candidates, so ICE
+  // cannot form a working pair and the DataChannel never opens.
+  useEffect(() => {
+    if (!joinSessionId || !peerConnection) return;
+
+    const added = new Set<string>();
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch("/api/signaling", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "poll",
+            sessionId: joinSessionId,
+            role: "peer",
+          }),
+        });
+
+        const data = await res.json();
+        if (!data.success || !Array.isArray(data.remoteCandidates)) return;
+
+        for (const c of data.remoteCandidates) {
+          const key = JSON.stringify(c);
+          if (added.has(key)) continue;
+          added.add(key);
+          try {
+            await peerConnection.addIceCandidate(new RTCIceCandidate(c));
+          } catch {
+            // ignore malformed or duplicate candidate
+          }
+        }
+      } catch {
+        // ignore polling network errors
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [joinSessionId, peerConnection]);
+
   // Timer countdown
   useEffect(() => {
     if (pairingStatus !== "listening" || timeLeft <= 0) return;
@@ -213,9 +285,9 @@ export function ConnectScreen({
   }, [pairingStatus, timeLeft]);
 
   // Join Existing Invite
-  const handleJoinInvite = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputCode.trim()) return;
+  const joinWithCode = async (rawCode: string) => {
+    const code = rawCode.trim().toUpperCase();
+    if (!code) return;
     setIsJoining(true);
     setJoinError(null);
 
@@ -225,7 +297,7 @@ export function ConnectScreen({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           action: "join",
-          inviteCode: inputCode.trim().toUpperCase(),
+          inviteCode: code,
         }),
       });
 
@@ -249,7 +321,7 @@ export function ConnectScreen({
         receivedChannel = ev.channel;
         receivedChannel.onopen = () => {
           onSessionEstablished({
-            peerName: `Peer-${inputCode.trim().toUpperCase()}`,
+            peerName: `Peer-${code}`,
             peerFingerprint: data.creatorFingerprint || "4B89:9F01:7712:2018",
             peerSafetyNumber: data.creatorSafetyNumber || "7291 4018 5590",
             connectionType: "direct-p2p",
@@ -278,6 +350,11 @@ export function ConnectScreen({
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
 
+      // Expose this connection so the join poll effect can apply the
+      // creator's ICE candidates as they trickle in.
+      setPeerConnection(pc);
+      setJoinSessionId(data.sessionId);
+
       // Submit answer
       await fetch("/api/signaling", {
         method: "POST",
@@ -290,19 +367,20 @@ export function ConnectScreen({
         }),
       });
 
-      // Wait a moment for STUN P2P handshake, with fallback
+      // Wait for the STUN handshake. If the DataChannel never opens we must
+      // NOT claim success: the previous fallback reported connectionType
+      // "direct-p2p" with no channel, so messages silently went nowhere.
       setTimeout(() => {
-        if (!receivedChannel || receivedChannel.readyState !== "open") {
-          // If strict firewall blocks direct STUN, fallback to high fidelity demo pairing
-          onSessionEstablished({
-            peerName: `Direct Peer (${inputCode.trim().toUpperCase()})`,
-            peerFingerprint: data.creatorFingerprint || "4B89:9F01:7712:2018",
-            peerSafetyNumber: data.creatorSafetyNumber || "7291 4018 5590",
-            connectionType: "direct-p2p",
-            peerConnection: pc,
-          });
+        if (receivedChannel && receivedChannel.readyState === "open") {
+          // ondatachannel.onopen already handled the success path
+          return;
         }
-      }, 3500);
+        setJoinError(
+          "Direct connection could not be established within 8s. Your network may block P2P traffic. " +
+            "Ask your peer to retry, or use Sandbox Mode to explore the app."
+        );
+        setStatusMessage("Handshake incomplete — no data channel opened.");
+      }, 8000);
     } catch (err: unknown) {
       console.error(err);
       setJoinError("Connection handshake timed out or network blocked direct P2P. Try Sandbox Mode.");
@@ -310,6 +388,23 @@ export function ConnectScreen({
       setIsJoining(false);
     }
   };
+
+  const handleJoinInvite = (e: React.FormEvent) => {
+    e.preventDefault();
+    joinWithCode(inputCode);
+  };
+
+  // Auto-join when arriving from a scanned QR link (?join=CODE)
+  const autoJoinAttempted = React.useRef(false);
+  useEffect(() => {
+    const code = initialJoinCode?.trim().toUpperCase();
+    if (!code || autoJoinAttempted.current) return;
+    autoJoinAttempted.current = true;
+    setActiveTab("join");
+    setInputCode(code);
+    joinWithCode(code);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialJoinCode]);
 
   const handleCopyCode = () => {
     if (!inviteCode) return;
@@ -323,6 +418,13 @@ export function ConnectScreen({
     const secs = s % 60;
     return `${mins}:${secs < 10 ? "0" : ""}${secs}`;
   };
+
+  // QR payload: a full link so scanning with any phone camera opens the app
+  // with the invite code pre-filled on the peer's device.
+  const qrPayload =
+    typeof window !== "undefined" && inviteCode
+      ? `${window.location.origin}/?join=${inviteCode}`
+      : inviteCode;
 
   return (
     <div className="flex flex-col h-full max-w-xl mx-auto w-full p-4 sm:p-6">
@@ -369,7 +471,7 @@ export function ConnectScreen({
             {inviteCode ? (
               <>
                 <div className="mb-2">
-                  <CanvasQr text={inviteCode} size={190} />
+                  <CanvasQr text={qrPayload} size={190} />
                 </div>
 
                 <div className="mt-2 flex items-center gap-2">

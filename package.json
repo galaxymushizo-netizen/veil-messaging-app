@@ -1,6 +1,31 @@
 {
-  "name": "nextjs-postgresql-template",
+  "name": "veil-messaging-app",
+  "version": "1.1.0",
   "private": true,
+  "description": "VEIL — end-to-end encrypted peer-to-peer messaging. Messages travel directly between peers over a WebRTC DataChannel; the signaling server only brokers the handshake and never sees message content.",
+  "license": "MIT",
+  "author": "galaxymushizo-netizen",
+  "homepage": "https://veil-messaging.vercel.app",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/galaxymushizo-netizen/veil-messaging-app.git"
+  },
+  "bugs": {
+    "url": "https://github.com/galaxymushizo-netizen/veil-messaging-app/issues"
+  },
+  "keywords": [
+    "e2ee",
+    "p2p",
+    "webrtc",
+    "datachannel",
+    "privacy",
+    "messaging",
+    "nextjs",
+    "typescript"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -16,6 +41,7 @@
     "lucide-react": "^1.57.0",
     "next": "16.2.6",
     "pg": "8.20.0",
+    "qrcode.react": "^4.2.0",
     "react": "19.2.6",
     "react-dom": "19.2.6"
   },

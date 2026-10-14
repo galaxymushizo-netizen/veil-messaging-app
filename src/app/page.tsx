@@ -14,7 +14,11 @@ import { generateFingerprint, generateSafetyNumber } from "@/lib/crypto";
 
 export default function VeilApp() {
   // Navigation: "welcome" | "inbox" | "chat" | "connect" | "settings"
-  const [currentScreen, setCurrentScreen] = useState<"welcome" | "inbox" | "chat" | "connect" | "settings">("welcome");
+  // Always start at "welcome" so the server and client render the same HTML
+  // (avoids a hydration mismatch). A ?join= deep-link switches below on mount.
+  const [currentScreen, setCurrentScreen] = useState<"welcome" | "inbox" | "chat" | "connect" | "settings">(
+    "welcome"
+  );
 
   // User Profile
   const [userName, setUserName] = useState("Anonymous Peer");
@@ -35,16 +39,27 @@ export default function VeilApp() {
   const [showHowItWorks, setShowHowItWorks] = useState(false);
   const [verifiedPeers, setVerifiedPeers] = useState<Record<string, boolean>>({});
 
+  // Invite code carried from a scanned QR link (?join=CODE); set on mount below
+  const [joinCodeFromUrl, setJoinCodeFromUrl] = useState<string | null>(null);
+
   // Active WebRTC references (held in memory ref)
   const activeDataChannels = useRef<Record<string, RTCDataChannel>>({});
   const activePeerConnections = useRef<Record<string, RTCPeerConnection>>({});
 
-  // Initialize identity on mount
+  // Initialize identity on mount, and handle a ?join= deep-link from a scanned QR
   useEffect(() => {
     const fp = generateFingerprint();
     const seed = Math.random().toString(36).substring(2, 10);
     setUserFingerprint(fp);
     setUserSafetySeed(seed);
+
+    const joinCode = new URLSearchParams(window.location.search).get("join");
+    if (joinCode) {
+      setJoinCodeFromUrl(joinCode.toUpperCase());
+      setCurrentScreen("connect");
+      // Clean the URL so a refresh doesn't re-trigger the join
+      window.history.replaceState({}, "", window.location.pathname);
+    }
   }, []);
 
   // Disappearing messages cleanup ticker
@@ -419,6 +434,7 @@ export default function VeilApp() {
             safetyNumber: generateSafetyNumber(userSafetySeed, "peer-seed"),
           }}
           onSessionEstablished={handleSessionEstablished}
+          initialJoinCode={joinCodeFromUrl || undefined}
         />
       )}
 
