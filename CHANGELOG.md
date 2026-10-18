@@ -5,6 +5,46 @@ All notable changes to this project are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-10-18
+
+### Changed
+
+Visual de-cluttering of the entry screen and the explainer. The goal was to
+remove decorative filler that made the interface read as generated rather than
+designed, while keeping every functional control.
+
+**Welcome screen**
+
+- Removed the three ambient blurred background orbs.
+- Removed the animated "Zero Cloud Storage &bull; Ephemeral Memory Only" ping
+  badge; the same information now lives in the footer as a plain sentence.
+- Removed the three-stop gradient on the headline and replaced the copy with a
+  concrete claim — *"Messages that never touch a server."*
+- Removed the decorative gradient tile behind the logo and the "P2P Protocol"
+  pill next to it.
+- Removed the three feature cards (`Direct P2P` / `DTLS/SCTP` / `Zero Logs`),
+  which duplicated the paragraph above them.
+- Removed the "Identity Ready" micro-status pill.
+- Replaced the `Sparkles` icon on the explainer trigger with `Info`, relabelled
+  "Architecture & Transparency" to **How it works**, and dropped its pill
+  styling for a plain text button.
+- The fingerprint in the identity card is now a button that explains what a
+  safety number is and why it changes, instead of being inert text.
+- Dropped unused state (`isEditingName`) and unused icon imports.
+
+**How it works modal**
+
+- Replaced four identically-styled stacked cards with a numbered vertical
+  sequence for the three connection steps, plus two single-purpose sections.
+- Removed the self-referential "Honest Engineering Disclaimers" heading — the
+  same caveats now sit under **Where this falls short**, stated directly.
+- Removed the numbered section headings ("1. Zero Server-Side Chat Storage",
+  "2. WebRTC DataChannel Handshake", "3. Safety Number Verification").
+- Replaced the condescending **I Understand &bull; Continue** button with
+  **Close**, and the `✕` text glyph with a proper icon plus an `aria-label`.
+- Tightened copy throughout and added the missing caveat that there is no TURN
+  relay, so restrictive networks fail to pair rather than falling back.
+
 ## [1.1.0] - 2026-10-14
 
 ### Fixed
